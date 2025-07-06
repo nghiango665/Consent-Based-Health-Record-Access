@@ -5,6 +5,9 @@
 (define-constant ERR_EXPIRED (err u103))
 (define-constant ERR_INVALID_DURATION (err u104))
 (define-constant ERR_SELF_ACCESS (err u105))
+(define-constant ERR_EMERGENCY_NOT_FOUND (err u106))
+(define-constant ERR_EMERGENCY_EXPIRED (err u107))
+(define-constant EMERGENCY_ACCESS_DURATION u144)
 
 (define-map patients principal 
   {
@@ -244,4 +247,114 @@
     total-consents: (var-get total-consents),
     contract-owner: CONTRACT_OWNER
   }
+)
+
+
+(define-map emergency-access-requests
+  { patient: principal, emergency-contact: principal }
+  {
+    requested-at: uint,
+    emergency-type: (string-ascii 30),
+    location: (string-ascii 50),
+    expires-at: uint,
+    status: (string-ascii 10)
+  }
+)
+
+(define-map emergency-consents
+  { patient: principal, emergency-contact: principal }
+  {
+    granted-at: uint,
+    expires-at: uint,
+    emergency-type: (string-ascii 30),
+    access-count: uint,
+    auto-granted: bool
+  }
+)
+
+(define-data-var total-emergency-requests uint u0)
+
+(define-public (request-emergency-access 
+  (patient principal) 
+  (emergency-type (string-ascii 30)) 
+  (location (string-ascii 50))
+)
+  (let (
+    (emergency-contact tx-sender)
+    (expires-at (+ stacks-block-height EMERGENCY_ACCESS_DURATION))
+    (request-key { patient: patient, emergency-contact: emergency-contact })
+  )
+    (asserts! (not (is-eq patient emergency-contact)) ERR_SELF_ACCESS)
+    (asserts! (is-some (map-get? patients patient)) ERR_NOT_FOUND)
+    (asserts! (is-some (map-get? healthcare-providers emergency-contact)) ERR_NOT_FOUND)
+    (asserts! (get verified (unwrap! (map-get? healthcare-providers emergency-contact) ERR_NOT_FOUND)) ERR_UNAUTHORIZED)
+    
+    (map-set emergency-access-requests request-key {
+      requested-at: stacks-block-height,
+      emergency-type: emergency-type,
+      location: location,
+      expires-at: expires-at,
+      status: "pending"
+    })
+    
+    (var-set total-emergency-requests (+ (var-get total-emergency-requests) u1))
+    (ok true)
+  )
+)
+
+(define-public (grant-emergency-access (emergency-contact principal))
+  (let (
+    (patient tx-sender)
+    (request-key { patient: patient, emergency-contact: emergency-contact })
+    (request-data (unwrap! (map-get? emergency-access-requests request-key) ERR_EMERGENCY_NOT_FOUND))
+  )
+    (asserts! (is-eq (get status request-data) "pending") ERR_UNAUTHORIZED)
+    (asserts! (< stacks-block-height (get expires-at request-data)) ERR_EMERGENCY_EXPIRED)
+    
+    (map-set emergency-access-requests request-key 
+      (merge request-data { status: "approved" })
+    )
+    
+    (map-set emergency-consents request-key {
+      granted-at: stacks-block-height,
+      expires-at: (get expires-at request-data),
+      emergency-type: (get emergency-type request-data),
+      access-count: u0,
+      auto-granted: false
+    })
+    
+    (ok true)
+  )
+)
+
+(define-public (access-emergency-record (patient principal))
+  (let (
+    (emergency-contact tx-sender)
+    (consent-key { patient: patient, emergency-contact: emergency-contact })
+    (consent-data (unwrap! (map-get? emergency-consents consent-key) ERR_EMERGENCY_NOT_FOUND))
+    (record-data (unwrap! (map-get? health-records patient) ERR_NOT_FOUND))
+  )
+    (asserts! (< stacks-block-height (get expires-at consent-data)) ERR_EMERGENCY_EXPIRED)
+    
+    (map-set emergency-consents consent-key
+      (merge consent-data { 
+        access-count: (+ (get access-count consent-data) u1)
+      })
+    )
+    
+    (ok {
+      record-hash: (get record-hash record-data),
+      record-type: (get record-type record-data),
+      emergency-type: (get emergency-type consent-data),
+      accessed-at: stacks-block-height
+    })
+  )
+)
+
+(define-read-only (get-emergency-request (patient principal) (emergency-contact principal))
+  (map-get? emergency-access-requests { patient: patient, emergency-contact: emergency-contact })
+)
+
+(define-read-only (get-emergency-consent (patient principal) (emergency-contact principal))
+  (map-get? emergency-consents { patient: patient, emergency-contact: emergency-contact })
 )
