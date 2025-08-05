@@ -358,3 +358,74 @@
 (define-read-only (get-emergency-consent (patient principal) (emergency-contact principal))
   (map-get? emergency-consents { patient: patient, emergency-contact: emergency-contact })
 )
+
+(define-constant ERR_AUDIT_NOT_FOUND (err u108))
+
+(define-map audit-trail
+  { event-id: uint }
+  {
+    event-type: (string-ascii 30),
+    actor: principal,
+    target: principal,
+    timestamp: uint,
+    metadata: (string-ascii 100),
+    block-height: uint
+  }
+)
+
+(define-map patient-event-counts
+  { patient: principal }
+  { count: uint }
+)
+
+(define-data-var next-event-id uint u1)
+(define-data-var total-audit-events uint u0)
+
+(define-private (log-audit-event 
+  (event-type (string-ascii 30))
+  (actor principal)
+  (target principal)
+  (metadata (string-ascii 100))
+)
+  (let (
+    (event-id (var-get next-event-id))
+    (current-count (default-to u0 (get count (map-get? patient-event-counts { patient: target }))))
+  )
+    (map-set audit-trail { event-id: event-id } {
+      event-type: event-type,
+      actor: actor,
+      target: target,
+      timestamp: stacks-block-height,
+      metadata: metadata,
+      block-height: stacks-block-height
+    })
+    
+    (map-set patient-event-counts { patient: target } { count: (+ current-count u1) })
+    
+    (var-set next-event-id (+ event-id u1))
+    (var-set total-audit-events (+ (var-get total-audit-events) u1))
+    (ok event-id)
+  )
+)
+
+(define-public (get-audit-event (event-id uint))
+  (ok (map-get? audit-trail { event-id: event-id }))
+)
+
+(define-read-only (get-patient-events (patient principal) (event-id uint))
+  (match (map-get? audit-trail { event-id: event-id })
+    event-data (if (is-eq (get target event-data) patient) (some event-data) none)
+    none
+  )
+)
+
+(define-read-only (get-patient-event-count (patient principal))
+  (default-to u0 (get count (map-get? patient-event-counts { patient: patient })))
+)
+
+(define-read-only (get-audit-stats)
+  {
+    total-events: (var-get total-audit-events),
+    next-event-id: (var-get next-event-id)
+  }
+)
