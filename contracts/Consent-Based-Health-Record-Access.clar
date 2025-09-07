@@ -9,6 +9,9 @@
 (define-constant ERR_EMERGENCY_EXPIRED (err u107))
 (define-constant EMERGENCY_ACCESS_DURATION u144)
 
+(define-constant ERR_RATING_INVALID (err u109))
+(define-constant ERR_ANALYTICS_NOT_FOUND (err u110))
+
 (define-map patients principal 
   {
     name: (string-ascii 50),
@@ -428,4 +431,122 @@
     total-events: (var-get total-audit-events),
     next-event-id: (var-get next-event-id)
   }
+)
+
+
+(define-map patient-analytics
+  { patient: principal }
+  {
+    total-accesses: uint,
+    unique-accessors: uint,
+    last-access: uint,
+    avg-monthly-accesses: uint,
+    most-accessed-record-type: (string-ascii 20),
+    consent-grant-rate: uint
+  }
+)
+
+(define-map provider-analytics
+  { provider: principal }
+  {
+    total-requests: uint,
+    approved-requests: uint,
+    denied-requests: uint,
+    avg-rating: uint,
+    total-ratings: uint,
+    last-activity: uint,
+    reputation-score: uint
+  }
+)
+
+(define-map access-metrics
+  { patient: principal, provider: principal, date: uint }
+  {
+    access-count: uint,
+    record-types-accessed: (list 5 (string-ascii 20)),
+    session-duration: uint
+  }
+)
+
+(define-map provider-ratings
+  { patient: principal, provider: principal }
+  {
+    rating: uint,
+    feedback: (string-ascii 200),
+    rated-at: uint
+  }
+)
+
+(define-data-var total-analytics-entries uint u0)
+
+(define-public (rate-provider (provider principal) (rating uint) (feedback (string-ascii 200)))
+  (let (
+    (patient tx-sender)
+    (rating-key { patient: patient, provider: provider })
+  )
+    (asserts! (and (>= rating u1) (<= rating u5)) ERR_RATING_INVALID)
+    (asserts! (is-some (map-get? active-consents { patient: patient, accessor: provider })) ERR_UNAUTHORIZED)
+    
+    (map-set provider-ratings rating-key {
+      rating: rating,
+      feedback: feedback,
+      rated-at: stacks-block-height
+    })
+    
+    (if (update-provider-reputation provider rating) (ok true) (ok true))
+  )
+)
+
+(define-private (update-provider-reputation (provider principal) (new-rating uint))
+  (let (
+    (current-analytics (default-to {
+      total-requests: u0, approved-requests: u0, denied-requests: u0,
+      avg-rating: u0, total-ratings: u0, last-activity: u0, reputation-score: u0
+    } (map-get? provider-analytics { provider: provider })))
+    (total-ratings (+ (get total-ratings current-analytics) u1))
+    (rating-sum (+ (* (get avg-rating current-analytics) (get total-ratings current-analytics)) new-rating))
+    (new-avg (/ rating-sum total-ratings))
+    (reputation-score (+ (* new-avg u20) (if (< (* (get approved-requests current-analytics) u2) u100) (* (get approved-requests current-analytics) u2) u100)))
+  )
+    (begin
+      (map-set provider-analytics { provider: provider }
+        (merge current-analytics {
+          avg-rating: new-avg,
+          total-ratings: total-ratings,
+          reputation-score: reputation-score,
+          last-activity: stacks-block-height
+        })
+      )
+      true
+    )
+  )
+)
+
+(define-read-only (get-patient-analytics (patient principal))
+  (map-get? patient-analytics { patient: patient })
+)
+
+(define-read-only (get-provider-analytics (provider principal))
+  (map-get? provider-analytics { provider: provider })
+)
+
+(define-read-only (get-provider-rating (patient principal) (provider principal))
+  (map-get? provider-ratings { patient: patient, provider: provider })
+)
+
+(define-read-only (get-access-insights (patient principal))
+  (let (
+    (analytics (map-get? patient-analytics { patient: patient }))
+  )
+    (match analytics
+      data (some {
+        privacy-score: (- u100 (if (< (* (get total-accesses data) u2) u100) (* (get total-accesses data) u2) u100)),
+        trust-level: (if (> (get consent-grant-rate data) u70) "high" 
+                      (if (> (get consent-grant-rate data) u40) "medium" "low")),
+        data-popularity: (if (> (get unique-accessors data) u10) "high"
+                         (if (> (get unique-accessors data) u5) "medium" "low"))
+      })
+      none
+    )
+  )
 )
