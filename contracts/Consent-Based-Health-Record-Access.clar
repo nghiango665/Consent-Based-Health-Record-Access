@@ -12,6 +12,10 @@
 (define-constant ERR_RATING_INVALID (err u109))
 (define-constant ERR_ANALYTICS_NOT_FOUND (err u110))
 
+(define-constant ERR_DELEGATE_EXISTS (err u111))
+(define-constant ERR_NOT_DELEGATE (err u112))
+(define-constant ERR_DELEGATE_EXPIRED (err u113))
+
 (define-map patients principal 
   {
     name: (string-ascii 50),
@@ -548,5 +552,97 @@
       })
       none
     )
+  )
+)
+
+
+(define-map patient-delegates
+  { patient: principal, delegate: principal }
+  {
+    authorized-at: uint,
+    expires-at: uint,
+    permissions: (string-ascii 50),
+    active: bool,
+    actions-performed: uint
+  }
+)
+
+(define-map delegate-actions
+  { action-id: uint }
+  {
+    delegate: principal,
+    patient: principal,
+    action-type: (string-ascii 30),
+    target-provider: principal,
+    performed-at: uint
+  }
+)
+
+(define-data-var total-delegates uint u0)
+(define-data-var next-action-id uint u1)
+
+(define-public (authorize-delegate 
+  (delegate principal) 
+  (duration uint) 
+  (permissions (string-ascii 50))
+)
+  (let ((patient tx-sender))
+    (asserts! (not (is-eq patient delegate)) ERR_SELF_ACCESS)
+    (asserts! (> duration u0) ERR_INVALID_DURATION)
+    (asserts! (is-none (map-get? patient-delegates { patient: patient, delegate: delegate })) ERR_DELEGATE_EXISTS)
+    (map-set patient-delegates { patient: patient, delegate: delegate } {
+      authorized-at: stacks-block-height,
+      expires-at: (+ stacks-block-height duration),
+      permissions: permissions,
+      active: true,
+      actions-performed: u0
+    })
+    (var-set total-delegates (+ (var-get total-delegates) u1))
+    (ok true)
+  )
+)
+
+(define-public (revoke-delegate (delegate principal))
+  (let (
+    (patient tx-sender)
+    (delegate-key { patient: patient, delegate: delegate })
+    (delegate-data (unwrap! (map-get? patient-delegates delegate-key) ERR_NOT_DELEGATE))
+  )
+    (map-set patient-delegates delegate-key (merge delegate-data { active: false }))
+    (ok true)
+  )
+)
+
+(define-public (delegate-grant-consent (patient principal) (requester principal))
+  (let (
+    (delegate tx-sender)
+    (delegate-key { patient: patient, delegate: delegate })
+    (delegate-data (unwrap! (map-get? patient-delegates delegate-key) ERR_NOT_DELEGATE))
+    (request-key { patient: patient, requester: requester })
+    (request-data (unwrap! (map-get? consent-requests request-key) ERR_NOT_FOUND))
+  )
+    (asserts! (get active delegate-data) ERR_UNAUTHORIZED)
+    (asserts! (< stacks-block-height (get expires-at delegate-data)) ERR_DELEGATE_EXPIRED)
+    (asserts! (is-eq (get status request-data) "pending") ERR_UNAUTHORIZED)
+    (map-set consent-requests request-key (merge request-data { status: "approved" }))
+    (map-set active-consents { patient: patient, accessor: requester } {
+      granted-at: stacks-block-height,
+      expires-at: (get expires-at request-data),
+      purpose: (get purpose request-data),
+      access-count: u0,
+      record-types: (get record-types request-data)
+    })
+    (ok true)
+  )
+)
+
+(define-read-only (get-delegate-status (patient principal) (delegate principal))
+  (map-get? patient-delegates { patient: patient, delegate: delegate })
+)
+
+(define-read-only (check-delegate-validity (patient principal) (delegate principal))
+  (match (map-get? patient-delegates { patient: patient, delegate: delegate })
+    data (and (get active data) (< stacks-block-height (get expires-at data)))
+    false
   )
 )
