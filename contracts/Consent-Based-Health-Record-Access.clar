@@ -16,6 +16,10 @@
 (define-constant ERR_NOT_DELEGATE (err u112))
 (define-constant ERR_DELEGATE_EXPIRED (err u113))
 
+(define-constant ERR_TEMPLATE_NOT_FOUND (err u114))
+(define-constant ERR_TEMPLATE_EXISTS (err u115))
+(define-constant ERR_TEMPLATE_INACTIVE (err u116))
+
 (define-map patients principal 
   {
     name: (string-ascii 50),
@@ -645,4 +649,96 @@
     data (and (get active data) (< stacks-block-height (get expires-at data)))
     false
   )
+)
+
+(define-map consent-templates
+  { patient: principal, template-id: uint }
+  {
+    template-name: (string-ascii 30),
+    default-duration: uint,
+    default-record-types: (list 5 (string-ascii 20)),
+    auto-approve: bool,
+    created-at: uint,
+    active: bool,
+    usage-count: uint
+  }
+)
+
+(define-map patient-template-count
+  { patient: principal }
+  { count: uint }
+)
+
+(define-data-var total-templates uint u0)
+
+(define-public (create-consent-template
+  (template-name (string-ascii 30))
+  (duration uint)
+  (record-types (list 5 (string-ascii 20)))
+  (auto-approve bool)
+)
+  (let (
+    (patient tx-sender)
+    (template-id (default-to u0 (get count (map-get? patient-template-count { patient: patient }))))
+  )
+    (asserts! (is-some (map-get? patients patient)) ERR_NOT_FOUND)
+    (asserts! (> duration u0) ERR_INVALID_DURATION)
+    (map-set consent-templates { patient: patient, template-id: template-id } {
+      template-name: template-name,
+      default-duration: duration,
+      default-record-types: record-types,
+      auto-approve: auto-approve,
+      created-at: stacks-block-height,
+      active: true,
+      usage-count: u0
+    })
+    (map-set patient-template-count { patient: patient } { count: (+ template-id u1) })
+    (var-set total-templates (+ (var-get total-templates) u1))
+    (ok template-id)
+  )
+)
+
+(define-public (apply-template-to-request (requester principal) (template-id uint))
+  (let (
+    (patient tx-sender)
+    (template-key { patient: patient, template-id: template-id })
+    (template (unwrap! (map-get? consent-templates template-key) ERR_TEMPLATE_NOT_FOUND))
+    (request-key { patient: patient, requester: requester })
+    (request-data (unwrap! (map-get? consent-requests request-key) ERR_NOT_FOUND))
+  )
+    (asserts! (get active template) ERR_TEMPLATE_INACTIVE)
+    (asserts! (is-eq (get status request-data) "pending") ERR_UNAUTHORIZED)
+    (map-set consent-requests request-key (merge request-data { status: "approved" }))
+    (map-set active-consents { patient: patient, accessor: requester } {
+      granted-at: stacks-block-height,
+      expires-at: (+ stacks-block-height (get default-duration template)),
+      purpose: (get purpose request-data),
+      access-count: u0,
+      record-types: (get default-record-types template)
+    })
+    (map-set consent-templates template-key 
+      (merge template { usage-count: (+ (get usage-count template) u1) }))
+    (var-set total-consents (+ (var-get total-consents) u1))
+    (ok true)
+  )
+)
+
+(define-public (toggle-template (template-id uint))
+  (let (
+    (patient tx-sender)
+    (template-key { patient: patient, template-id: template-id })
+    (template (unwrap! (map-get? consent-templates template-key) ERR_TEMPLATE_NOT_FOUND))
+  )
+    (map-set consent-templates template-key 
+      (merge template { active: (not (get active template)) }))
+    (ok true)
+  )
+)
+
+(define-read-only (get-consent-template (patient principal) (template-id uint))
+  (map-get? consent-templates { patient: patient, template-id: template-id })
+)
+
+(define-read-only (get-patient-template-count (patient principal))
+  (default-to u0 (get count (map-get? patient-template-count { patient: patient })))
 )
